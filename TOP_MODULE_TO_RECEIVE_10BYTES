@@ -1,0 +1,107 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity UART_10Byte_Receiver is
+  generic (
+    -- Basys 3 Clock is 100 MHz. For 115200 Baud: 100,000,000 / 115200 = 868
+    g_CLKS_PER_BIT : integer := 10417
+  );
+  port (
+    i_Clk           : in  std_logic;                  -- Connect to Basys 3 W5 Pin (100MHz)
+    i_Rst           : in  std_logic;                  -- Connect to a pushbutton reset
+    i_RX_Serial     : in  std_logic;                  -- From MAX3232 Shifter (PMOD Pin)
+    o_Packet_Ready  : out std_logic;                  -- Pulses high for 1 cycle when 10 bytes arrive
+    
+    -- Flattened output array containing all 10 bytes (80 bits total)
+    o_Packet_Data   : out std_logic_vector(79 downto 0) 
+  );
+end UART_10Byte_Receiver;
+
+architecture Behavioral of UART_10Byte_Receiver is
+
+  -- 1. Component Declaration for your existing Nandland UART_RX
+  component UART_RX is
+    generic (
+      g_CLKS_PER_BIT : integer := 10417
+      
+    );
+    port (
+      i_Clk       : in  std_logic;
+      i_RX_Serial : in  std_logic;
+      o_RX_DV     : out std_logic;
+      o_RX_Byte   : out std_logic_vector(7 downto 0)
+    );
+  end component;
+
+  -- 2. Internal Interconnect Signals
+  signal w_RX_DV       : std_logic;
+  signal w_RX_Byte     : std_logic_vector(7 downto 0);
+  signal r_RX_Sync     : std_logic_vector(1 downto 0) := "11"; -- Double flop synchronizer
+
+  -- 3. Custom Memory Type for 10 Bytes
+  type t_Packet_Storage is array (0 to 9) of std_logic_vector(7 downto 0);
+  signal r_Storage     : t_Packet_Storage := (others => (others => '0'));
+  
+  -- 4. Tracking and Status Registers
+  signal r_Byte_Index  : integer range 0 to 9 := 0;
+  signal r_Packet_Ready : std_logic := '0';
+
+begin
+
+  -- Fix: Metastability protection for Basys 3 board input
+  p_Synchronizer : process (i_Clk)
+  begin
+    if rising_edge(i_Clk) then
+      r_RX_Sync <= r_RX_Sync(0) & i_RX_Serial;
+    end if;
+  end process p_Synchronizer;
+
+  -- Instantiation of your original UART Receiver
+  UART_RX_Inst : UART_RX
+    generic map (
+      g_CLKS_PER_BIT => g_CLKS_PER_BIT
+    )
+    port map (
+      i_Clk       => i_Clk,
+      i_RX_Serial => r_RX_Sync(1), -- Using the safely synchronized wire
+      o_RX_DV     => w_RX_DV,
+      o_RX_Byte   => w_RX_Byte
+    );
+
+  -- Packet Collector Control Process
+  p_Collect_Packet : process (i_Clk)
+  begin
+    if rising_edge(i_Clk) then
+      if i_Rst = '1' then
+        r_Byte_Index   <= 0;
+        r_Packet_Ready <= '0';
+        r_Storage      <= (others => (others => '0'));
+      else
+        -- Default assignment (clears the pulse on the next clock)
+        r_Packet_Ready <= '0';
+
+        -- Triggered every time your UART_RX finishes capturing a single byte
+        if w_RX_DV = '1' then
+          r_Storage(r_Byte_Index) <= w_RX_Byte; -- Save the current byte
+          
+          if r_Byte_Index = 9 then
+            r_Byte_Index   <= 0;                -- Reset index pointer for the next packet
+            r_Packet_Ready <= '1';              -- Notify system all 10 bytes are saved
+          else
+            r_Byte_Index   <= r_Byte_Index + 1; -- Increment memory slot index
+          end if;
+        end if;
+      end if;
+    end if;
+  end process p_Collect_Packet;
+
+  -- Drive top level outputs
+  o_Packet_Ready <= r_Packet_Ready;
+  
+  -- Concatenate the array index blocks sequentially into the 80-bit output bus
+  o_Packet_Data <= r_Storage(9) & r_Storage(8) & r_Storage(7) & r_Storage(6) & 
+                   r_Storage(5) & r_Storage(4) & r_Storage(3) & r_Storage(2) & 
+                   r_Storage(1) & r_Storage(0);
+
+end Behavioral;
